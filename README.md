@@ -1,3 +1,3 @@
 # detection_fragment
 
-Codes to analyze fragment error in object detection.
+Codes to analyze fragment errors in object detection.
