@@ -3,46 +3,104 @@ import math
 import torch
 import torch.nn as nn
 
-def convert_output_to_offset(detections, input_wh, num_classes, all_anchors):
+# def convert_output_to_offset(detections, input_wh, num_classes, all_anchors):
+#     """
+#     detections: list, [batch, amchors*(5+classes), grid, grid]
+#     input_wh: input image size
+#     num_classes: classes to detect
+#     all_anchors: list of all anchor boxes e.g., [[w1,h1], [w2,h2], [w3,h3], ...] 
+#     """
+#     new_detections = list()
+#     for i in range(len(detections)):
+#         det = detections[i]
+#         batch = det.shape[0]
+#         grid_size = det.shape[-1] # w or h
+#         stride = input_wh // grid_size # 413 // 13 ...
+#         anchors_per_out = det.shape[1]//(5+num_classes) # = 3
+        
+#         det = det.view(batch, anchors_per_out*(5+num_classes), -1)
+#         det = det.transpose(1, 2).contiguous()
+#         det = det.view(batch, -1, (5+num_classes))
+#         anchors = [ [a[0]/stride, a[1]/stride] for a in all_anchors[grid_size]] # convert amchor sizes into local scale
+#         anchors = torch.cuda.FloatTensor(anchors)
+
+#         # det: [batch, grid*grid*anchor, 5+classes] = [cx, cy, w, h, objectness, (class)]
+#         det[:,:,0] = torch.sigmoid(det[:,:,0]) # centerX
+#         det[:,:,1] = torch.sigmoid(det[:,:,1]) # centerY
+#         det[:,:,2] = torch.exp(det[:,:,2]) # w
+#         det[:,:,3] = torch.exp(det[:,:,3]) # h
+#         det[:,:,4] = torch.sigmoid(det[:,:,4]) # objectness
+#         det[:,:,5:] = torch.sigmoid(det[:,:,5:]) # class probability
+
+#         x, y = np.meshgrid(np.arange(grid_size), np.arange(grid_size))
+#         x, y = torch.cuda.FloatTensor(x).view(-1,1), torch.cuda.FloatTensor(y).view(-1,1)
+#         xy_grid = torch.cat((x,y),1).repeat(1,anchors_per_out).view(-1,2).unsqueeze(0) # [1, 13*13*3, 2]
+#         det[:,:,:2] += xy_grid # :: b = sigmoid(prediction) + x
+
+#         anchors = anchors.repeat(grid_size*grid_size, 1).unsqueeze(0) # [1, 13*13*3, 2]
+#         det[:,:, 2:4] *= anchors  # :: exp(w)*p, exp(h)*p
+#         det[:,:,:4] *= stride  # get coordinates to original image scale
+#         new_detections.append(det)
+#     return new_detections
+
+
+def convert_scores_to_sigmoid(detections, num_classes):
     """
-    detections: list, [batch, amchors*(5+classes), grid, grid]
-    input_wh: input image size
-    num_classes: classes to detect
-    all_anchors: list of all anchor boxes e.g., [[w1,h1], [w2,h2], [w3,h3], ...] 
+    detections: list [[b, (5+classes), h, w], [b, (5+classes), h, w], [b, (5+classes), h, w]]
+    num_classes: number of classes to detect
     """
     new_detections = list()
     for i in range(len(detections)):
         det = detections[i]
         batch = det.shape[0]
-        grid_size = det.shape[-1] # w or h
-        stride = input_wh // grid_size # 413 // 13 ...
-        anchors_per_out = det.shape[1]//(5+num_classes) # = 3
+        num_local_anchors = det.shape[1]//(5+num_classes) # = 3
         
-        det = det.view(batch, anchors_per_out*(5+num_classes), -1)
+        det = det.view(batch, num_local_anchors*(5+num_classes), -1)
         det = det.transpose(1, 2).contiguous()
         det = det.view(batch, -1, (5+num_classes))
-        anchors = [ [a[0]/stride, a[1]/stride] for a in all_anchors[grid_size]] # convert amchor sizes into local scale
-        anchors = torch.cuda.FloatTensor(anchors)
+
+        # det: [batch, grid*grid*anchor, 5+classes] = [cx, cy, w, h, objectness, (class)]
+        det[:,:,4] = torch.sigmoid(det[:,:,4]) # objectness
+        det[:,:,5:] = torch.sigmoid(det[:,:,5:]) # class probability
+        new_detections.append(det)
+    return new_detections
+
+
+def convert_coordinates_to_offset(detections, input_size, num_classes, grids, all_anchors):
+    """
+    detections: list, [[b, all_anchors, (5+classes)], ...]
+    """
+    new_detections = list()
+    for i in range(len(detections)):
+        det = detections[i]
+        
+        batch = det.shape[0]
+        grid_size = grids[i][0] # w or h
+        stride = input_size // grid_size # 413 // 13 ...
+        num_local_anchors = det.shape[1]
+        local_anchors = [ [a[0]/stride, a[1]/stride] for a in all_anchors[grid_size]] # convert original anchor sizes into local scale
+        local_anchors = torch.cuda.FloatTensor(local_anchors)
+
+        print("det", det.shape, grid_size, stride, num_local_anchors)
 
         # det: [batch, grid*grid*anchor, 5+classes] = [cx, cy, w, h, objectness, (class)]
         det[:,:,0] = torch.sigmoid(det[:,:,0]) # centerX
         det[:,:,1] = torch.sigmoid(det[:,:,1]) # centerY
         det[:,:,2] = torch.exp(det[:,:,2]) # w
         det[:,:,3] = torch.exp(det[:,:,3]) # h
-        det[:,:,4] = torch.sigmoid(det[:,:,4]) # objectness
-        det[:,:,5:] = torch.sigmoid(det[:,:,5:]) # class probability
 
         x, y = np.meshgrid(np.arange(grid_size), np.arange(grid_size))
         x, y = torch.cuda.FloatTensor(x).view(-1,1), torch.cuda.FloatTensor(y).view(-1,1)
-        xy_grid = torch.cat((x,y),1).repeat(1,anchors_per_out).view(-1,2).unsqueeze(0) # [1, 13*13*3, 2]
-        det[:,:,:2] += xy_grid # :: b = sigmoid(prediction) + x
+        xy_grid = torch.cat((x,y),1).repeat(1, num_local_anchors//(grid_size**2)).view(-1,2).unsqueeze(0) # [1, 13*13*3, 2]
+        det[:,:,:2] += xy_grid # :: b = sigmoid(prediction_x) + x
 
-        anchors = anchors.repeat(grid_size*grid_size, 1).unsqueeze(0) # [1, 13*13*3, 2]
-        det[:,:, 2:4] *= anchors  # :: exp(w)*p, exp(h)*p
-        det[:,:,:4] *= stride  # get coordinates to original image scale
+        local_anchors = local_anchors.repeat(grid_size*grid_size, 1).unsqueeze(0) # [1, 13*13*3, 2]
+        det[:,:, 2:4] *= local_anchors  # :: exp(prediction_w)*p, exp(prediction_h)*p
+        det[:,:,:4] *= stride  # convert lovcal scale coordinates to original image scale
         new_detections.append(det)
-
     return new_detections
+
+
 
 
 def point_form(boxes):
